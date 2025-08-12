@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Pipeline & Client Tracker</title>
+  <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">
+  <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
+  <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">
+  <script src=\"https://cdn.tailwindcss.com\"></script>
+  <script crossorigin src=\"https://unpkg.com/react@18/umd/react.development.js\"></script>
+  <script crossorigin src=\"https://unpkg.com/react-dom@18/umd/react-dom.development.js\"></script>
+  <script src=\"https://unpkg.com/@babel/standalone/babel.min.js\"></script>
+  <style>
+    :root { color-scheme: light; }
+    html, body { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial; }
+    .input { padding: 0.45rem 0.6rem; border: 1px solid #e5e7eb; border-radius: 0.6rem; background: #fff; outline: none; }
+    .input:focus { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); border-color: #a5b4fc; }
+    .btn { padding: 0.45rem 0.8rem; border-radius: 0.75rem; border: 1px solid #e5e7eb; background: #fff; font-size: 0.9rem; }
+    .btn:hover { background: #f8fafc; }
+    .btn-primary { padding: 0.5rem 0.9rem; border-radius: 0.85rem; border: 1px solid #6366f1; background: #6366f1; color: #fff; font-weight: 600; }
+    .btn-primary:hover { filter: brightness(1.05); }
+    .btn-danger { padding: 0.4rem 0.7rem; border-radius: 0.7rem; border: 1px solid #fecaca; color: #dc2626; background: #fff; font-size: 0.85rem; }
+    .btn-danger:hover { background: #fef2f2; }
+    .chip { padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; border: 1px solid #e5e7eb; background: #f8fafc; }
+    .th-btn { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .th-btn svg { width: 12px; height: 12px; opacity: 0.6; }
+    .th-btn:hover svg { opacity: 1; }
+  </style>
+</head>
+<body class=\"min-h-screen bg-gradient-to-b from-indigo-50 via-white to-white text-neutral-900\">
+  <div id=\"root\"></div>
+
+  <script type=\"text/babel\">
+    const { useEffect, useMemo, useState } = React;
+
+    const STORAGE_KEY = \"pipeline_crm_v2\";
+
+    const toYMD = (d) => {
+      if (!d) return \"\";
+      const dt = typeof d === \"string\" ? new Date(d) : d;
+      if (Number.isNaN(dt?.getTime())) return \"\";
+      const m = String(dt.getMonth() + 1).padStart(2, \"0\");
+      const day = String(dt.getDate()).padStart(2, \"0\");
+      return `${dt.getFullYear()}-${m}-${day}`;
+    };
+
+    const addBusinessDays = (isoDate, n = 0) => {
+      if (!isoDate) return \"\";
+      let dt = new Date(isoDate + \"T00:00:00\");
+      let added = 0;
+      while (added < n) {
+        dt.setDate(dt.getDate() + 1);
+        const day = dt.getDay();
+        if (day !== 0 && day !== 6) added++;
+      }
+      return toYMD(dt);
+    };
+
+    const within = (isoDate, start, end) => {
+      if (!isoDate) return false;
+      const t = new Date(isoDate + \"T00:00:00\").getTime();
+      const s = new Date(start + \"T00:00:00\").getTime();
+      const e = new Date(end + \"T23:59:59\").getTime();
+      return t >= s && t <= e;
+    };
+
+    const uid = () => Math.random().toString(36).slice(2, 10);
+
+    const initialData = {
+      calls: [],
+      introductions: [],
+      discovery: [],
+      diagnosis: [],
+      sow: [],
+      recommendations: [],
+      paperwork: [],
+      reviews: [],
+    };
+
+    const STAGE_ORDER = [
+      \"calls\",\"introductions\",\"discovery\",\"diagnosis\",\"sow\",\"recommendations\",\"paperwork\",\"reviews\"
+    ];
+
+    const NEXT_STAGE = {
+      calls: \"introductions\",
+      introductions: \"discovery\",
+      discovery: \"diagnosis\",
+      diagnosis: \"sow\",
+      sow: \"recommendations\",
+      recommendations: \"paperwork\",
+      paperwork: \"reviews\",
+    };
+
+    const SET_FIELD = {
+      calls: \"introSet\",
+      introductions: \"discoSet\",
+      discovery: \"diagnosisSet\",
+      diagnosis: \"sowSet\",
+      sow: \"recommendationSet\",
+      recommendations: \"paperworkSet\",
+      paperwork: \"reviewSet\",
+    };
+
+    const LABELS = {
+      calls: \"Calls\",
+      introductions: \"Introductions\",
+      discovery: \"Discovery\",
+      diagnosis: \"Diagnosis\",
+      sow: \"SOW\",
+      recommendations: \"Recommendations\",
+      paperwork: \"Paperwork\",
+      reviews: \"Reviews\",
+    };
+
+    const CALENDAR_FIELDS = [
+      [\"calls\",\"callDate\",\"Call\"],
+      [\"calls\",\"followUpDate\",\"Follow-Up\"],
+      [\"introductions\",\"introDate\",\"Introduction\"],
+      [\"discovery\",\"discoDate\",\"Discovery\"],
+      [\"diagnosis\",\"diagnosisDate\",\"Diagnosis\"],
+      [\"sow\",\"sowDate\",\"SOW\"],
+      [\"recommendations\",\"recommendationDate\",\"Recommendation\"],
+      [\"paperwork\",\"paperworkDate\",\"Paperwork\"],
+      [\"reviews\",\"reviewDate\",\"Review\"],
+    ];
+
+    const DRAW_PERIODS = [
+      { label: \"Aug 12 → Sep 8\", start: \"2025-08-12\", end: \"2025-09-08\", introGoal: 10, discoGoal: 4 },
+      { label: \"Sep 9 → Oct 6\", start: \"2025-09-09\", end: \"2025-10-06\", introGoal: 10, discoGoal: 4 },
+      { label: \"Oct 7 → Nov 3\", start: \"2025-10-07\", end: \"2025-11-03\", introGoal: 10, discoGoal: 4 },
+    ];
+
+    // ---------- Sorting helpers ----------
+    const cmpString = (a,b) => (a||\"\").toString().localeCompare((b||\"\").toString(), undefined, { sensitivity: \"base\" });
+    const cmpBool = (a,b) => (a===b ? 0 : (a? -1: 1)); // true first
+    const cmpDate = (a,b) => {
+      const pa = a ? Date.parse(a+\"T00:00:00\") : Number.POSITIVE_INFINITY;
+      const pb = b ? Date.parse(b+\"T00:00:00\") : Number.POSITIVE_INFINITY;
+      return pa - pb;
+    };
+    const sortFns = { string: cmpString, boolean: cmpBool, date: cmpDate };
+
+    function useSort(rows){
+      const [sort, setSort] = useState({ key: null, dir: \"asc\", type: \"string\" });
+      const sorted = React.useMemo(() => {
+        if (!sort.key) return rows;
+        const fn = sortFns[sort.type] || cmpString;
+        const list = [...rows].sort((r1,r2) => fn(get(r1, sort.key), get(r2, sort.key)));
+        return sort.dir === \"asc\" ? list : list.reverse();
+      }, [rows, sort]);
+      const requestSort = (key, type=\"string\") => {
+        setSort(prev => {
+          if (prev.key !== key) return { key, dir: \"asc\", type };
+          if (prev.dir === \"asc\") return { key, dir: \"desc\", type };
+          return { key: null, dir: \"asc\", type }; // off
+        });
+      };
+      return { sorted, sort, requestSort };
+    }
+
+    const get = (obj, path) => (path.split(\".\").reduce((o,k)=> (o? o[k]: undefined), obj));
+
+    function App(){
+      const [data, setData] = useState(() => {
+        try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : initialData; }
+        catch { return initialData; }
+      });
+      const [activeTab, setActiveTab] = useState(\"calendar\");
+
+      useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }, [data]);
+
+      const addCall = () => {
+        setData(prev => ({
+          ...prev,
+          calls: [...prev.calls, { id: uid(), name: \"\", callDate: \"\", introSet: false, followUpDate: \"\", coi: false, referral: false, notes: \"\" }]
+        }));
+      };
+
+      const getDownstreamStages = (fromStage) => {
+        const idx = STAGE_ORDER.indexOf(fromStage);
+        return idx >= 0 ? STAGE_ORDER.slice(idx + 1) : [];
+      };
+
+      const buildDownstreamRow = (stageKey, fromRow, sourceId) => {
+        const common = { id: uid(), name: fromRow?.name || \"\", notes: \"\", sourceId, ancestorId: fromRow?.ancestorId || fromRow?.sourceId || null, sourceChain: [...(fromRow?.sourceChain || []), sourceId] };
+        switch(stageKey){
+          case \"introductions\": return { ...common, introRan:false, introDate:\"\", draftSent:false, discoSet:false, priority:\"Medium\" };
+          case \"discovery\": return { ...common, discoRan:false, discoDate:\"\", draftSent:false, diagnosisSet:false };
+          case \"diagnosis\": return { ...common, diagnosisRan:false, diagnosisDate:\"\", draftSent:false, sowSet:false };
+          case \"sow\": return { ...common, sowRan:false, sowDate:\"\", draftSent:false, rcPotential:\"\", recommendationSet:false };
+          case \"recommendations\": return { ...common, recommendationRan:false, recommendationDate:\"\", draftSent:false, paperworkSet:false };
+          case \"paperwork\": return { ...common, paperworkRan:false, paperworkDate:\"\", draftSent:false, rcsPosted:false, reviewSet:false };
+          case \"reviews\": return { ...common, reviewRan:false, reviewDate:\"\", draftSent:false };
+          default: return common;
+        }
+      };
+
+      const updateRow = (stageKey, id, patch) => {
+        setData(prev => {
+          const list = prev[stageKey].map(r => r.id === id ? { ...r, ...patch } : r);
+          let next = { ...prev, [stageKey]: list };
+
+          if (stageKey === \"calls\" && (\"callDate\" in patch)){
+            next[stageKey] = next[stageKey].map(row => row.id === id ? { ...row, followUpDate: row.callDate ? addBusinessDays(row.callDate, 8) : \"\" } : row);
+          }
+
+          const setField = SET_FIELD[stageKey];
+          const nextStage = NEXT_STAGE[stageKey];
+          if (setField && nextStage && (setField in patch)){
+            const nowSet = patch[setField] === true;
+            const currentRow = list.find(r => r.id === id);
+            if (nowSet){
+              const exists = prev[nextStage].some(r => r.sourceId === id);
+              if (!exists){
+                const downstream = buildDownstreamRow(nextStage, currentRow, id);
+                next[nextStage] = [...prev[nextStage], downstream];
+              }
+            } else {
+              next[nextStage] = prev[nextStage].filter(r => r.sourceId !== id);
+              const cascade = getDownstreamStages(nextStage);
+              cascade.forEach(sk => {
+                next[sk] = (next[sk] || []).filter(r => r.ancestorId !== id && (r.sourceChain || []).indexOf(id) === -1);
+              });
+            }
+          }
+
+          return next;
+        });
+      };
+
+      const updateField = (stageKey, id, field, value) => updateRow(stageKey, id, { [field]: value });
+
+      const deleteRow = (stageKey, id) => {
+        setData(prev => {
+          const next = { ...prev, [stageKey]: prev[stageKey].filter(r => r.id !== id) };
+          if (stageKey === \"calls\"){
+            const stages = getDownstreamStages(\"introductions\");
+            [\"introductions\", ...stages].forEach(sk => {
+              next[sk] = next[sk].filter(r => r.sourceId !== id && r.ancestorId !== id && !(r.sourceChain || []).includes(id));
+            });
+          }
+          const nextStage = NEXT_STAGE[stageKey];
+          if (nextStage){
+            next[nextStage] = next[nextStage].filter(r => r.sourceId !== id);
+            const cascade = getDownstreamStages(nextStage);
+            cascade.forEach(sk => {
+              next[sk] = next[sk].filter(r => r.ancestorId !== id && !(r.sourceChain || []).includes(id));
+            });
+          }
+          return next;
+        });
+      };
+
+      const calendarEvents = useMemo(() => {
+        const events = [];
+        CALENDAR_FIELDS.forEach(([stageKey, dateField, prefix]) => {
+          (data[stageKey] || []).forEach(row => {
+            const date = row[dateField];
+            if (date) events.push({ date, title: `${prefix}: ${row.name || \"(no name)\"}`, stageKey, id: row.id });
+          });
+        });
+        return events;
+      }, [data]);
+
+      const drawStats = useMemo(() => {
+        return DRAW_PERIODS.map(p => {
+          const introCount = (data.introductions || []).filter(r => r.introRan && within(r.introDate, p.start, p.end)).length;
+          const discoCount = (data.discovery || []).filter(r => r.discoRan && within(r.discoDate, p.start, p.end)).length;
+          return { ...p, introCount, discoCount, introPct: Math.min(100, Math.round((introCount / p.introGoal) * 100)), discoPct: Math.min(100, Math.round((discoCount / p.discoGoal) * 100)) };
+        });
+      }, [data]);
+
+      return (
+        <div>
+          <header className=\"sticky top-0 z-10 border-b border-indigo-100/80 bg-white/75 backdrop-blur\">
+            <div className=\"max-w-7xl mx-auto px-4 py-4 flex items-center justify-between\">
+              <div className=\"flex items-center gap-3\">
+                <div className=\"w-9 h-9 rounded-xl bg-indigo-600 shadow-sm grid place-items-center text-white font-semibold\">PT</div>
+                <h1 className=\"text-2xl font-semibold tracking-tight\">Pipeline & Client Tracker</h1>
+              </div>
+              <div className=\"flex gap-2 flex-wrap\">
+                <button className={\`px-3 py-1.5 rounded-full text-sm border \${activeTab === \"calendar\" ? \"bg-indigo-600 text-white border-indigo-600\" : \"bg-white hover:bg-indigo-50 border-indigo-200 text-indigo-700\"}\`} onClick={() => setActiveTab(\"calendar\")}>Calendar</button>
+                {STAGE_ORDER.map(key => (
+                  <button key={key} className={\`px-3 py-1.5 rounded-full text-sm border \${activeTab === key ? \"bg-indigo-600 text-white border-indigo-600\" : \"bg-white hover:bg-indigo-50 border-indigo-200 text-indigo-700\"}\`} onClick={() => setActiveTab(key)}>{LABELS[key]}</button>
+                ))}
+                <button className={\`px-3 py-1.5 rounded-full text-sm border \${activeTab === \"draw\" ? \"bg-indigo-600 text-white border-indigo-600\" : \"bg-white hover:bg-indigo-50 border-indigo-200 text-indigo-700\"}\`} onClick={() => setActiveTab(\"draw\")}>Draw Mgmt</button>
+              </div>
+            </div>
+          </header>
+
+          <main className=\"max-w-7xl mx-auto px-4 py-6\">
+            {activeTab === \"calendar\" && <CalendarView events={calendarEvents} />}
+            {activeTab === \"calls\" && <CallsView rows={data.calls} addCall={addCall} updateField={updateField} deleteRow={deleteRow} />}
+            {activeTab === \"introductions\" && <IntroductionsView rows={data.introductions} updateField={updateField} deleteRow={deleteRow} />}
+            {activeTab === \"discovery\" && <DiscoveryView rows={data.discovery} updateField={updateField} deleteRow={deleteRow} />}
+            {activeTab === \"diagnosis\" && <DiagnosisView rows={data.diagnosis} updateField={updateField} deleteRow={deleteRow} />}
+            {activeTab === \"sow\" && <SOWView rows={data.sow} updateField={updateField} deleteRow={deleteRow} />}
+            {activeTab === \"recommendations\" && <RecommendationsView rows={data.recommendations} updateField={updateField} deleteRow={deleteRow} />}
+            {activeTab === \"paperwork\" && <PaperworkView rows={data.paperwork} updateField={updateField} deleteRow={deleteRow} />}
+            {activeTab === \"reviews\" && <ReviewsView rows={data.reviews} updateField={updateField} deleteRow={deleteRow} />}
+            {activeTab === \"draw\" && <DrawManagementView stats={drawStats} />}
+          </main>
+        </div>
+      );
+    }
+
+    function Section({ title, children, right }){
+      return (
+        <section className=\"mb-10\">
+          <div className=\"flex items-center justify-between mb-4\">
+            <h2 className=\"text-xl font-semibold tracking-tight\">{title}</h2>
+            {right}
+          </div>
+          <div className=\"bg-white rounded-2xl shadow-sm border border-indigo-100 overflow-hidden\">{children}</div>
+        </section>
+      );
+    }
+
+    function SortIcon({ dir }){
+      return (
+        <span className=\"inline-flex flex-col -space-y-1\">
+          <svg viewBox=\"0 0 20 20\" fill={dir==='asc' ? 'currentColor' : 'none'} stroke=\"currentColor\"><path d=\"M10 5l-4 4h8l-4-4z\"/></svg>
+          <svg viewBox=\"0 0 20 20\" fill={dir==='desc' ? 'currentColor' : 'none'} stroke=\"currentColor\"><path d=\"M10 15l4-4H6l4 4z\"/></svg>
+        </span>
+      );
+    }
+
+    function Table({ columns, rows }){
+      const { sorted, sort, requestSort } = useSort(rows);
+
+      return (
+        <div className=\"overflow-x-auto\">
+          <table className=\"min-w-full text-sm\">
+            <thead className=\"bg-indigo-50/70 border-b border-indigo-100 sticky top-[68px] z-10\">
+              <tr>
+                {columns.map(col => (
+                  <th key={col.key} className=\"text-left px-3 py-2 font-medium text-indigo-900/90 whitespace-nowrap\">
+                    {col.sortType ? (
+                      <button className=\"th-btn\" onClick={() => requestSort(col.key, col.sortType)} title=\"Sort\">
+                        <span>{col.header}</span>
+                        <SortIcon dir={sort.key===col.key ? sort.dir : null} />
+                      </button>
+                    ) : (
+                      <span>{col.header}</span>
+                    )}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className=\"divide-y divide-neutral-100\">
+              {sorted.length === 0 ? (
+                <tr><td colSpan={columns.length} className=\"px-3 py-8 text-center text-neutral-500\">No entries yet.</td></tr>
+              ) : (
+                sorted.map(row => (
+                  <tr key={row.id} className=\"hover:bg-indigo-50/40 transition-colors\">
+                    {columns.map(col => (
+                      <td key={col.key} className=\"px-3 py-2 align-top\">{col.render ? col.render(row) : row[col.key]}</td>
+                    ))}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    function CallsView({ rows, addCall, updateField, deleteRow }){
+      const columns = [
+        { key: \"name\", header: \"Name\", sortType: \"string\", render: r => <input className=\"w-52 lg:w-64 input\" value={r.name} onChange={e => updateField(\"calls\", r.id, \"name\", e.target.value)} placeholder=\"Full name\" /> },
+        { key: \"callDate\", header: \"Call Date\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.callDate || \"\\"} onChange={e => updateField(\"calls\", r.id, \"callDate\", e.target.value)} /> },
+        { key: \"introSet\", header: \"Intro Set\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.introSet} onChange={e => updateField(\"calls\", r.id, \"introSet\", e.target.checked)} /> },
+        { key: \"followUpDate\", header: \"Follow-Up (8 Biz Days)\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.followUpDate || \"\\"} readOnly /> },
+        { key: \"coiReferral\", header: \"COI / Referral\", render: r => (
+          <div className=\"flex items-center gap-3\">
+            <label className=\"inline-flex items-center gap-1\"><input type=\"checkbox\" checked={!!r.coi} onChange={e => updateField(\"calls\", r.id, \"coi\", e.target.checked)} /><span className=\"text-neutral-700\">COI</span></label>
+            <label className=\"inline-flex items-center gap-1\"><input type=\"checkbox\" checked={!!r.referral} onChange={e => updateField(\"calls\", r.id, \"referral\", e.target.checked)} /><span className=\"text-neutral-700\">Referral</span></label>
+          </div>
+        ) },
+        { key: \"notes\", header: \"Notes\", render: r => <textarea className=\"input w-80 lg:w-[28rem] h-10\" value={r.notes} onChange={e => updateField(\"calls\", r.id, \"notes\", e.target.value)} placeholder=\"Notes\" /> },
+        { key: \"actions\", header: \"\", render: r => <button className=\"btn-danger\" onClick={() => deleteRow(\"calls\", r.id)}>Delete</button> },
+      ];
+      return (
+        <Section title=\"Calls\" right={<button className=\"btn-primary\" onClick={addCall}>+ Add Call</button>}>
+          <Table columns={columns} rows={rows} />
+        </Section>
+      );
+    }
+
+    function IntroductionsView({ rows, updateField, deleteRow }){
+      const columns = [
+        { key: \"name\", header: \"Name\", sortType: \"string\", render: r => <ReadOnly value={r.name} /> },
+        { key: \"introRan\", header: \"Intro Ran\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.introRan} onChange={e => updateField(\"introductions\", r.id, \"introRan\", e.target.checked)} /> },
+        { key: \"introDate\", header: \"Intro Date\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.introDate || \"\\"} onChange={e => updateField(\"introductions\", r.id, \"introDate\", e.target.value)} /> },
+        { key: \"draftSent\", header: \"Draft Sent\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.draftSent} onChange={e => updateField(\"introductions\", r.id, \"draftSent\", e.target.checked)} /> },
+        { key: \"discoSet\", header: \"Disco Set\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.discoSet} onChange={e => updateField(\"introductions\", r.id, \"discoSet\", e.target.checked)} /> },
+        { key: \"priority\", header: \"Priority\", sortType: \"string\", render: r => (
+          <select className=\"input\" value={r.priority || \"Medium\"} onChange={e => updateField(\"introductions\", r.id, \"priority\", e.target.value)}>
+            <option>High</option><option>Medium</option><option>Low</option>
+          </select>
+        ) },
+        { key: \"notes\", header: \"Notes\", render: r => <textarea className=\"input w-72 lg:w-96 h-10\" value={r.notes || \"\\"} onChange={e => updateField(\"introductions\", r.id, \"notes\", e.target.value)} /> },
+        { key: \"actions\", header: \"\", render: r => <button className=\"btn-danger\" onClick={() => deleteRow(\"introductions\", r.id)}>Delete</button> },
+      ];
+      return (
+        <Section title=\"Introductions (names appear when 'Intro Set' is checked in Calls)\">
+          <Table columns={columns} rows={rows} />
+        </Section>
+      );
+    }
+
+    function DiscoveryView({ rows, updateField, deleteRow }){
+      const columns = [
+        { key: \"name\", header: \"Name\", sortType: \"string\", render: r => <ReadOnly value={r.name} /> },
+        { key: \"discoRan\", header: \"Disco Ran\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.discoRan} onChange={e => updateField(\"discovery\", r.id, \"discoRan\", e.target.checked)} /> },
+        { key: \"discoDate\", header: \"Disco Date\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.discoDate || \"\\"} onChange={e => updateField(\"discovery\", r.id, \"discoDate\", e.target.value)} /> },
+        { key: \"draftSent\", header: \"Draft Sent\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.draftSent} onChange={e => updateField(\"discovery\", r.id, \"draftSent\", e.target.checked)} /> },
+        { key: \"diagnosisSet\", header: \"Diagnosis Set\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.diagnosisSet} onChange={e => updateField(\"discovery\", r.id, \"diagnosisSet\", e.target.checked)} /> },
+        { key: \"notes\", header: \"Notes\", render: r => <textarea className=\"input w-72 lg:w-96 h-10\" value={r.notes || \"\\"} onChange={e => updateField(\"discovery\", r.id, \"notes\", e.target.value)} /> },
+        { key: \"actions\", header: \"\", render: r => <button className=\"btn-danger\" onClick={() => deleteRow(\"discovery\", r.id)}>Delete</button> },
+      ];
+      return (
+        <Section title=\"Discovery (names appear when 'Disco Set' is checked in Introductions)\">
+          <Table columns={columns} rows={rows} />
+        </Section>
+      );
+    }
+
+    function DiagnosisView({ rows, updateField, deleteRow }){
+      const columns = [
+        { key: \"name\", header: \"Name\", sortType: \"string\", render: r => <ReadOnly value={r.name} /> },
+        { key: \"diagnosisRan\", header: \"Diagnosis Ran\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.diagnosisRan} onChange={e => updateField(\"diagnosis\", r.id, \"diagnosisRan\", e.target.checked)} /> },
+        { key: \"diagnosisDate\", header: \"Diagnosis Date\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.diagnosisDate || \"\\"} onChange={e => updateField(\"diagnosis\", r.id, \"diagnosisDate\", e.target.value)} /> },
+        { key: \"draftSent\", header: \"Draft Sent\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.draftSent} onChange={e => updateField(\"diagnosis\", r.id, \"draftSent\", e.target.checked)} /> },
+        { key: \"sowSet\", header: \"SOW Set\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.sowSet} onChange={e => updateField(\"diagnosis\", r.id, \"sowSet\", e.target.checked)} /> },
+        { key: \"notes\", header: \"Notes\", render: r => <textarea className=\"input w-72 lg:w-96 h-10\" value={r.notes || \"\\"} onChange={e => updateField(\"diagnosis\", r.id, \"notes\", e.target.value)} /> },
+        { key: \"actions\", header: \"\", render: r => <button className=\"btn-danger\" onClick={() => deleteRow(\"diagnosis\", r.id)}>Delete</button> },
+      ];
+      return (
+        <Section title=\"Diagnosis (names appear when 'Diagnosis Set' is checked in Discovery)\">
+          <Table columns={columns} rows={rows} />
+        </Section>
+      );
+    }
+
+    function SOWView({ rows, updateField, deleteRow }){
+      const columns = [
+        { key: \"name\", header: \"Name\", sortType: \"string\", render: r => <ReadOnly value={r.name} /> },
+        { key: \"sowRan\", header: \"SOW Ran\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.sowRan} onChange={e => updateField(\"sow\", r.id, \"sowRan\", e.target.checked)} /> },
+        { key: \"sowDate\", header: \"SOW Date\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.sowDate || \"\\"} onChange={e => updateField(\"sow\", r.id, \"sowDate\", e.target.value)} /> },
+        { key: \"draftSent\", header: \"Draft Sent\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.draftSent} onChange={e => updateField(\"sow\", r.id, \"draftSent\", e.target.checked)} /> },
+        { key: \"rcPotential\", header: \"RC Potential\", sortType: \"string\", render: r => <input className=\"input w-28\" value={r.rcPotential || \"\\"} onChange={e => updateField(\"sow\", r.id, \"rcPotential\", e.target.value)} placeholder=\"# or note\" /> },
+        { key: \"recommendationSet\", header: \"Recommendation Set\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.recommendationSet} onChange={e => updateField(\"sow\", r.id, \"recommendationSet\", e.target.checked)} /> },
+        { key: \"notes\", header: \"Notes\", render: r => <textarea className=\"input w-72 lg:w-96 h-10\" value={r.notes || \"\\"} onChange={e => updateField(\"sow\", r.id, \"notes\", e.target.value)} /> },
+        { key: \"actions\", header: \"\", render: r => <button className=\"btn-danger\" onClick={() => deleteRow(\"sow\", r.id)}>Delete</button> },
+      ];
+      return (
+        <Section title=\"SOW (names appear when 'SOW Set' is checked in Diagnosis)\">
+          <Table columns={columns} rows={rows} />
+        </Section>
+      );
+    }
+
+    function RecommendationsView({ rows, updateField, deleteRow }){
+      const columns = [
+        { key: \"name\", header: \"Name\", sortType: \"string\", render: r => <ReadOnly value={r.name} /> },
+        { key: \"recommendationRan\", header: \"Recommendation Ran\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.recommendationRan} onChange={e => updateField(\"recommendations\", r.id, \"recommendationRan\", e.target.checked)} /> },
+        { key: \"recommendationDate\", header: \"Recommendation Date\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.recommendationDate || \"\\"} onChange={e => updateField(\"recommendations\", r.id, \"recommendationDate\", e.target.value)} /> },
+        { key: \"draftSent\", header: \"Draft Sent\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.draftSent} onChange={e => updateField(\"recommendations\", r.id, \"draftSent\", e.target.checked)} /> },
+        { key: \"paperworkSet\", header: \"Paperwork Set\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.paperworkSet} onChange={e => updateField(\"recommendations\", r.id, \"paperworkSet\", e.target.checked)} /> },
+        { key: \"notes\", header: \"Notes\", render: r => <textarea className=\"input w-72 lg:w-96 h-10\" value={r.notes || \"\\"} onChange={e => updateField(\"recommendations\", r.id, \"notes\", e.target.value)} /> },
+        { key: \"actions\", header: \"\", render: r => <button className=\"btn-danger\" onClick={() => deleteRow(\"recommendations\", r.id)}>Delete</button> },
+      ];
+      return (
+        <Section title=\"Recommendations (names appear when 'Recommendation Set' is checked in SOW)\">
+          <Table columns={columns} rows={rows} />
+        </Section>
+      );
+    }
+
+    function PaperworkView({ rows, updateField, deleteRow }){
+      const columns = [
+        { key: \"name\", header: \"Name\", sortType: \"string\", render: r => <ReadOnly value={r.name} /> },
+        { key: \"paperworkRan\", header: \"Paperwork Ran\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.paperworkRan} onChange={e => updateField(\"paperwork\", r.id, \"paperworkRan\", e.target.checked)} /> },
+        { key: \"paperworkDate\", header: \"Paperwork Date\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.paperworkDate || \"\\"} onChange={e => updateField(\"paperwork\", r.id, \"paperworkDate\", e.target.value)} /> },
+        { key: \"draftSent\", header: \"Draft Sent\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.draftSent} onChange={e => updateField(\"paperwork\", r.id, \"draftSent\", e.target.checked)} /> },
+        { key: \"rcsPosted\", header: \"RC's Posted\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.rcsPosted} onChange={e => updateField(\"paperwork\", r.id, \"rcsPosted\", e.target.checked)} /> },
+        { key: \"reviewSet\", header: \"Review Set\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.reviewSet} onChange={e => updateField(\"paperwork\", r.id, \"reviewSet\", e.target.checked)} /> },
+        { key: \"notes\", header: \"Notes\", render: r => <textarea className=\"input w-72 lg:w-96 h-10\" value={r.notes || \"\\"} onChange={e => updateField(\"paperwork\", r.id, \"notes\", e.target.value)} /> },
+        { key: \"actions\", header: \"\", render: r => <button className=\"btn-danger\" onClick={() => deleteRow(\"paperwork\", r.id)}>Delete</button> },
+      ];
+      return (
+        <Section title=\"Paperwork (names appear when 'Paperwork Set' is checked in Recommendations)\">
+          <Table columns={columns} rows={rows} />
+        </Section>
+      );
+    }
+
+    function ReviewsView({ rows, updateField, deleteRow }){
+      const columns = [
+        { key: \"name\", header: \"Name\", sortType: \"string\", render: r => <ReadOnly value={r.name} /> },
+        { key: \"reviewRan\", header: \"Review Ran\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.reviewRan} onChange={e => updateField(\"reviews\", r.id, \"reviewRan\", e.target.checked)} /> },
+        { key: \"reviewDate\", header: \"Review Date\", sortType: \"date\", render: r => <input type=\"date\" className=\"input\" value={r.reviewDate || \"\\"} onChange={e => updateField(\"reviews\", r.id, \"reviewDate\", e.target.value)} /> },
+        { key: \"draftSent\", header: \"Draft Sent\", sortType: \"boolean\", render: r => <input type=\"checkbox\" checked={!!r.draftSent} onChange={e => updateField(\"reviews\", r.id, \"draftSent\", e.target.checked)} /> },
+        { key: \"notes\", header: \"Notes\", render: r => <textarea className=\"input w-72 lg:w-96 h-10\" value={r.notes || \"\\"} onChange={e => updateField(\"reviews\", r.id, \"notes\", e.target.value)} /> },
+        { key: \"actions\", header: \"\", render: r => <button className=\"btn-danger\" onClick={() => deleteRow(\"reviews\", r.id)}>Delete</button> },
+      ];
+      return (
+        <Section title=\"Reviews (names appear when 'Review Set' is checked in Paperwork)\">
+          <Table columns={columns} rows={rows} />
+        </Section>
+      );
+    }
+
+    function DrawManagementView({ stats }){
+      return (
+        <Section title=\"Draw Management Goals\">
+          <div className=\"p-5 grid md:grid-cols-2 gap-5\">
+            {stats.map(p => (
+              <div key={p.label} className=\"border border-indigo-100 rounded-xl p-5 bg-gradient-to-br from-white to-indigo-50/40\">
+                <div className=\"flex items-center justify-between mb-3\">
+                  <div className=\"font-medium\">{p.label}</div>
+                  <div className=\"text-xs md:text-sm text-neutral-600\">Goals: 10 Introductions, 4 Discoveries</div>
+                </div>
+                <ProgressRow label=\"Introductions Ran\" count={p.introCount} goal={p.introGoal} pct={p.introPct} />
+                <div className=\"h-3\"></div>
+                <ProgressRow label=\"Discoveries Ran\" count={p.discoCount} goal={p.discoGoal} pct={p.discoPct} />
+              </div>
+            ))}
+          </div>
+        </Section>
+      );
+    }
+
+    function ProgressRow({ label, count, goal, pct }){
+      return (
+        <div>
+          <div className=\"flex items-center justify-between mb-2\">
+            <div className=\"text-sm text-neutral-700\">{label}</div>
+            <div className=\"text-sm text-neutral-700\"><span className=\"chip\">{count} / {goal}</span> <span className=\"text-neutral-400\">({pct}%)</span></div>
+          </div>
+          <div className=\"w-full h-3 bg-neutral-100 rounded-full overflow-hidden\">
+            <div className=\"h-3 bg-indigo-600\" style={{ width: pct + '%' }}></div>
+          </div>
+        </div>
+      );
+    }
+
+    function CalendarView({ events }){
+      const [cursor, setCursor] = useState(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1); });
+      const days = useMemo(() => buildMonthGrid(cursor), [cursor]);
+      const evByDate = useMemo(() => groupEvents(events), [events]);
+      const monthLabel = cursor.toLocaleString(undefined, { month: \"long\", year: \"numeric\" });
+      return (
+        <Section title=\"Calendar\" right={
+          <div className=\"flex items-center gap-2\">
+            <button className=\"btn\" onClick={() => setCursor(d => new Date(d.getFullYear(), d.getMonth()-1, 1))}>{\"<\"} Prev</button>
+            <div className=\"text-sm text-neutral-600 w-40 text-center\">{monthLabel}</div>
+            <button className=\"btn\" onClick={() => setCursor(d => new Date(d.getFullYear(), d.getMonth()+1, 1))}>Next {\"\>\"}</button>
+          </div>
+        }>
+          <div className=\"grid grid-cols-7 gap-px bg-indigo-100\">
+            {[\"Sun\",\"Mon\",\"Tue\",\"Wed\",\"Thu\",\"Fri\",\"Sat\"].map(d => (
+              <div key={d} className=\"bg-indigo-50/70 px-2 py-2 text-xs font-medium text-indigo-700 text-center\">{d}</div>
+            ))}
+            {days.map(({date, inMonth}) => {
+              const key = toYMD(date);
+              const day = date.getDate();
+              const dayEvents = evByDate[key] || [];
+              return (
+                <div key={key} className={\`min-h-[110px] bg-white p-2 \${inMonth ? \"\" : \"opacity-40\"}\`}>
+                  <div className=\"text-xs text-neutral-500 mb-1\">{day}</div>
+                  <div className=\"space-y-1\">
+                    {dayEvents.map((ev,i) => (
+                      <div key={i} className=\"text-xs bg-indigo-50/60 border border-indigo-100 rounded px-2 py-1 truncate\" title={\`\${ev.title} • \${LABELS[ev.stageKey]}\`}>
+                        {ev.title}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      );
+    }
+
+    function buildMonthGrid(cursor){
+      const year = cursor.getFullYear();
+      const month = cursor.getMonth();
+      const first = new Date(year, month, 1);
+      const start = new Date(first);
+      start.setDate(first.getDate() - first.getDay());
+      const days = [];
+      for (let i=0;i<42;i++){
+        const d = new Date(start);
+        d.setDate(start.getDate() + i);
+        days.push({ date: d, inMonth: d.getMonth() === month });
+      }
+      return days;
+    }
+
+    function groupEvents(events){
+      const byDate = {};
+      events.forEach(ev => {
+        const key = toYMD(ev.date);
+        if (!byDate[key]) byDate[key] = [];
+        byDate[key].push(ev);
+      });
+      return byDate;
+    }
+
+    function ReadOnly({ value }){
+      return <div className=\"px-2 py-1 rounded bg-neutral-50 border border-neutral-200 text-sm min-w-[12rem]\">{value || \"—\"}</div>;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
